@@ -287,27 +287,54 @@ module cve2_id_stage #(
   if (XInterface) begin: gen_xif
 
     logic coproc_done;
+    logic [X_INSTR_INFLIGHT-1:0] scoreboard_d, scoreboard_q;
+    id_t x_instr_id_d, x_instr_id_q;
+
+    logic scoreboard_free;
+
+    assign scoreboard_free = ~scoreboard_q[x_instr_id_q];
+
+    always_comb begin
+      scoreboard_d = scoreboard_q;
+      x_instr_id_d = x_instr_id_q;
+      if (x_issue_valid_o && x_issue_ready_i && x_issue_resp_i.accept) begin
+        scoreboard_d[x_instr_id_q] = 1'b1;
+        x_instr_id_d = x_instr_id_q + 1'b1;
+      end
+      if (x_result_valid_i) begin
+        scoreboard_d[x_result_i.id] = 1'b0;
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : x_scoreboard
+      if (!rst_ni) begin
+        scoreboard_q <= '0;
+        x_instr_id_q <= '0;
+      end else begin
+        scoreboard_q <= scoreboard_d;
+        x_instr_id_q <= x_instr_id_d;
+      end
+    end
+
     assign multicycle_done = lsu_req_dec ? lsu_resp_valid_i : (illegal_insn_dec ? coproc_done : ex_valid_i);
 
     assign coproc_done = (x_issue_valid_o & x_issue_ready_i & ~x_issue_resp_i.writeback) | (x_result_valid_i & x_result_i.we);
 
     // Issue Interface
-    assign x_issue_valid_o      = instr_executing & illegal_insn_dec & (id_fsm_q == FIRST_CYCLE);
+    assign x_issue_valid_o      = instr_executing & illegal_insn_dec & (id_fsm_q == FIRST_CYCLE) & scoreboard_free;
     assign x_issue_req_o.instr  = instr_rdata_i;
-    assign x_issue_req_o.id     = '0;
+    assign x_issue_req_o.id     = x_instr_id_q;
     assign x_issue_req_o.hartid = hart_id_i;
 
     // Register Interface
     assign x_register_o.rs[0]    = rf_rdata_a_fwd;
     assign x_register_o.rs[1]    = rf_rdata_b_fwd;
     assign x_register_o.rs_valid = '1;
-    assign x_register_o.id       = '0;
+    assign x_register_o.id       = x_instr_id_q;
     assign x_register_o.hartid   = hart_id_i;
-
-    // Commit Interface
-    assign x_commit_valid_o       = 1'b1;
+    assign x_commit_valid_o       = x_issue_valid_o & x_issue_ready_i;
     assign x_commit_o.commit_kill = 1'b0;
-    assign x_commit_o.id          = '0;
+    assign x_commit_o.id          = x_instr_id_q;
     assign x_commit_o.hartid      = hart_id_i;
 
     // Result Interface
@@ -710,7 +737,6 @@ module cve2_id_stage #(
   // MULTI_CYCLE if it requires multiple cycles to complete regardless of stalls and other
   // considerations. An instruction may be held in FIRST_CYCLE if it's unable to begin executing
   // (this is controlled by instr_executing).
-
   always_comb begin
     id_fsm_d                = id_fsm_q;
     rf_we_raw               = rf_we_dec;
